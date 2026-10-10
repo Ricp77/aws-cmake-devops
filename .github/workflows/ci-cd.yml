@@ -1,0 +1,132 @@
+name: CMake CI-CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REPOSITORY: cmake-devops-demo
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CMake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ make
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON
+
+      - name: Compile
+        run: cmake --build build --parallel 2
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: cmake --install build --prefix "$PWD/package"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-package
+          path: package/
+
+  publish:
+    needs: test-build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Define immutable release tag
+        id: meta
+        run: |
+          echo "image=${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          docker build --pull -t "$IMAGE" .
+          docker push "$IMAGE"
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - name: Deploy and retain rollback image
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          NEW_IMAGE: ${{ needs.publish.outputs.image }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: NEW_IMAGE
+          script: |
+            set -eu
+            mkdir -p "$HOME/devops-release"
+            cd "$HOME/devops-release"
+
+            # Il container di esempio è un job C++ che termina.
+            # Prima di sostituire la release, salva l'ultima immagine.
+            if [ -f current-image ]; then
+              cp current-image previous-image
+            fi
+
+            # Il login ECR e il pull sono configurati separatamente
+            # sul server secondo le istruzioni successive.
+            docker pull "$NEW_IMAGE"
+
+            if ! OUTPUT=$(docker run --rm "$NEW_IMAGE"); then
+              echo "Nuova release fallita; rollback."
+              if [ -f previous-image ]; then
+                docker run --rm "$(cat previous-image)"
+              fi
+              exit 1
+            fi
+
+            if [ "$OUTPUT" != "OK" ]; then
+              echo "Output inatteso; rollback."
+              if [ -f previous-image ]; then
+                docker run --rm "$(cat previous-image)"
+              fi
+              exit 1
+            fi
+
+            echo "$NEW_IMAGE" > current-image
+            echo "Release verificata: $NEW_IMAGE"
