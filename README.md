@@ -1,7 +1,3 @@
-# C++ AWS DevOps Demo
-
-[![CMake CI-CD](https://github.com/Ricp77/aws-cmake-devops/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/Ricp77/aws-cmake-devops/actions/workflows/ci-cd.yml)
-
 Production-Grade C++ CI/CD Pipeline & Automated Deployment on AWS
 
 Stack: C++17, CMake, GitHub Actions, Docker, AWS ECR, AWS Systems Manager (SSM), Bash, jq
